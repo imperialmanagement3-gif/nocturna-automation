@@ -1,5 +1,11 @@
 {
   "buildCommand": "npm run build",
   "devCommand": "npm run dev",
-  "outputDirectory": ".next"
+  "outputDirectory": ".next",
+  "crons": [
+    {
+      "path": "/api/cron/generate",
+      "schedule": "0 * * * *"
+    }
+  ]
 }
