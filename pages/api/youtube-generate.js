@@ -1,18 +1,17 @@
 import { google } from 'googleapis';
 import axios from 'axios';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import fs from 'fs';
-
-const execAsync = promisify(exec);
+import path from 'path';
+import { createWriteStream } from 'fs';
 
 const TITLES = [
   "Lluvia fuerte para dormir profundamente | Sueño reparador 8 horas",
   "Dormir YA con lluvia torrencial y truenos | Sonidos relajantes",
   "Lluvia para dormir 8 horas sin insomnio",
+  "Lluvia para concentrarse y estudiar | Productividad máxima",
 ];
 
-const TAGS = ["lluvia", "dormir", "sueño profundo", "relajante", "truenos", "tormenta", "sonidos naturales", "ASMR"];
+const TAGS = ["lluvia", "dormir", "sueño profundo", "relajante", "truenos"];
 
 async function getPexelsVideo() {
   try {
@@ -20,10 +19,13 @@ async function getPexelsVideo() {
       headers: { Authorization: process.env.PEXELS_API_KEY },
       params: { query: "heavy rain", per_page: 1 },
     });
-    return response.data.videos[0].video_files[0].link;
+    if (response.data.videos && response.data.videos.length > 0) {
+      return response.data.videos[0].video_files[0].link;
+    }
   } catch (e) {
-    return "https://cdn.coverr.co/videos/coverr-rain-falling-outside-window-2559/1080p.mp4";
+    console.log("Pexels error, using fallback");
   }
+  return "https://cdn.coverr.co/videos/coverr-rain-falling-outside-window-2559/1080p.mp4";
 }
 
 function getYoutubeClient() {
@@ -32,35 +34,94 @@ function getYoutubeClient() {
     process.env.YOUTUBE_CLIENT_SECRET,
     "http://localhost"
   );
-  oauth2Client.setCredentials({ refresh_token: process.env.YOUTUBE_REFRESH_TOKEN });
+  oauth2Client.setCredentials({
+    refresh_token: process.env.YOUTUBE_REFRESH_TOKEN,
+  });
   return google.youtube({ version: "v3", auth: oauth2Client });
 }
 
-async function uploadToYoutube(videoPath, title) {
-  const youtube = getYoutubeClient();
-  const response = await youtube.videos.insert({
-    part: "snippet,status",
-    requestBody: {
-      snippet: { title, tags: TAGS, categoryId: "22" },
-      status: { privacyStatus: "public" },
-    },
-    media: { body: fs.createReadStream(videoPath) },
+async function downloadVideo(url, filepath) {
+  const response = await axios.get(url, { responseType: "stream" });
+  return new Promise((resolve, reject) => {
+    response.data
+      .pipe(createWriteStream(filepath))
+      .on("finish", resolve)
+      .on("error", reject);
   });
-  return response.data.id;
+}
+
+async function uploadToYoutube(videoPath, title) {
+  try {
+    const youtube = getYoutubeClient();
+    const response = await youtube.videos.insert(
+      {
+        part: "snippet,status",
+        requestBody: {
+          snippet: {
+            title: title.substring(0, 100),
+            tags: TAGS,
+            categoryId: "22",
+          },
+          status: {
+            privacyStatus: "public",
+          },
+        },
+        media: {
+          body: fs.createReadStream(videoPath),
+        },
+      },
+      {
+        onUploadProgress: (evt) => {
+          console.log(
+            `Upload ${Math.round((evt.bytesRead / evt.bytesTotal) * 100)}%`
+          );
+        },
+      }
+    );
+    return response.data.id;
+  } catch (error) {
+    console.error("Upload error:", error.message);
+    throw error;
+  }
 }
 
 export default async function handler(req, res) {
+  if (req.method !== "GET" && req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const tmpFile = `/tmp/video-${Date.now()}.mp4`;
+
   try {
+    console.log("1. Getting Pexels video...");
     const videoUrl = await getPexelsVideo();
-    const title = TITLES[Math.floor(Math.random() * TITLES.length)];
-    const videoId = await uploadToYoutube("/tmp/video.mp4", title);
+    console.log("2. Downloading...");
+    await downloadVideo(videoUrl, tmpFile);
     
+    const title = TITLES[Math.floor(Math.random() * TITLES.length)];
+    console.log("3. Uploading to YouTube:", title);
+    const videoId = await uploadToYoutube(tmpFile, title);
+
+    // Cleanup
+    if (fs.existsSync(tmpFile)) {
+      fs.unlinkSync(tmpFile);
+    }
+
     return res.status(200).json({
       success: true,
-      videoId,
+      message: "Video uploaded successfully",
+      videoId: videoId,
       youtubeUrl: `https://www.youtube.com/watch?v=${videoId}`,
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    console.error("ERROR:", error);
+    if (fs.existsSync(tmpFile)) {
+      fs.unlinkSync(tmpFile);
+    }
+    return res.status(500).json({
+      error: error.message,
+      timestamp: new Date().toISOString(),
+    });
   }
 }
